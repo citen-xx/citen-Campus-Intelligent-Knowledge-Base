@@ -3,24 +3,15 @@ package com.ruoyi.web.service;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.MessageType;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
-/**
- * 基于 Redis 的会话记忆实现
- *
- * 使用 Redis List 按 conversationId 持久化消息历史，支持服务重启后上下文恢复。
- */
+/** Stores scoped conversation history without coupling chat runtime code to Spring AI. */
 @Component
-public class RedisChatMemory implements ChatMemory
+public class RedisChatMemory
 {
     private static final String KEY_PREFIX = "ai:chat:memory:";
     private static final Duration TTL = Duration.ofDays(7);
@@ -35,8 +26,7 @@ public class RedisChatMemory implements ChatMemory
         this.objectMapper = objectMapper;
     }
 
-    @Override
-    public void add(String conversationId, List<Message> messages)
+    public void add(String conversationId, List<ChatMessage> messages)
     {
         if (conversationId == null || conversationId.isBlank() || messages == null || messages.isEmpty())
         {
@@ -45,15 +35,13 @@ public class RedisChatMemory implements ChatMemory
 
         String key = buildKey(conversationId);
         List<String> payloads = new ArrayList<>();
-        for (Message message : messages)
+        for (ChatMessage message : messages)
         {
-            if (message == null)
+            if (message != null)
             {
-                continue;
+                payloads.add(serialize(message));
             }
-            payloads.add(serialize(message));
         }
-
         if (payloads.isEmpty())
         {
             return;
@@ -61,7 +49,6 @@ public class RedisChatMemory implements ChatMemory
 
         stringRedisTemplate.opsForList().rightPushAll(key, payloads);
         stringRedisTemplate.expire(key, TTL);
-
         Long size = stringRedisTemplate.opsForList().size(key);
         if (size != null && size > MAX_HISTORY_SIZE)
         {
@@ -69,8 +56,7 @@ public class RedisChatMemory implements ChatMemory
         }
     }
 
-    @Override
-    public List<Message> get(String conversationId, int lastN)
+    public List<ChatMessage> get(String conversationId, int lastN)
     {
         if (conversationId == null || conversationId.isBlank())
         {
@@ -92,10 +78,10 @@ public class RedisChatMemory implements ChatMemory
             return List.of();
         }
 
-        List<Message> messages = new ArrayList<>();
+        List<ChatMessage> messages = new ArrayList<>();
         for (String payload : payloads)
         {
-            Message message = deserialize(payload);
+            ChatMessage message = deserialize(payload);
             if (message != null)
             {
                 messages.add(message);
@@ -104,14 +90,12 @@ public class RedisChatMemory implements ChatMemory
         return messages;
     }
 
-    @Override
     public void clear(String conversationId)
     {
-        if (conversationId == null || conversationId.isBlank())
+        if (conversationId != null && !conversationId.isBlank())
         {
-            return;
+            stringRedisTemplate.delete(buildKey(conversationId));
         }
-        stringRedisTemplate.delete(buildKey(conversationId));
     }
 
     private String buildKey(String conversationId)
@@ -119,12 +103,11 @@ public class RedisChatMemory implements ChatMemory
         return KEY_PREFIX + conversationId;
     }
 
-    private String serialize(Message message)
+    private String serialize(ChatMessage message)
     {
         try
         {
-            StoredMessage storedMessage = StoredMessage.from(message);
-            return objectMapper.writeValueAsString(storedMessage);
+            return objectMapper.writeValueAsString(new StoredMessage(message.role().name(), message.content()));
         }
         catch (Exception e)
         {
@@ -132,29 +115,47 @@ public class RedisChatMemory implements ChatMemory
         }
     }
 
-    private Message deserialize(String payload)
+    private ChatMessage deserialize(String payload)
     {
         try
         {
-            StoredMessage storedMessage = objectMapper.readValue(payload, StoredMessage.class);
-            if (storedMessage == null || storedMessage.type == null)
+            StoredMessage stored = objectMapper.readValue(payload, StoredMessage.class);
+            if (stored == null || stored.type == null)
             {
                 return null;
             }
-
-            MessageType type = MessageType.valueOf(storedMessage.type);
-            String text = Objects.toString(storedMessage.text, "");
-            return switch (type)
-            {
-                case USER -> new UserMessage(text);
-                case ASSISTANT -> new AssistantMessage(text);
-                case SYSTEM -> new SystemMessage(text);
-                default -> null;
-            };
+            ChatRole role = ChatRole.valueOf(stored.type.toUpperCase(Locale.ROOT));
+            return new ChatMessage(role, Objects.toString(stored.text, ""));
         }
         catch (Exception e)
         {
             return null;
+        }
+    }
+
+    public enum ChatRole
+    {
+        USER,
+        ASSISTANT,
+        SYSTEM
+    }
+
+    public record ChatMessage(ChatRole role, String content)
+    {
+        public ChatMessage
+        {
+            Objects.requireNonNull(role, "role");
+            content = Objects.toString(content, "");
+        }
+
+        public static ChatMessage user(String content)
+        {
+            return new ChatMessage(ChatRole.USER, content);
+        }
+
+        public static ChatMessage assistant(String content)
+        {
+            return new ChatMessage(ChatRole.ASSISTANT, content);
         }
     }
 
@@ -167,27 +168,10 @@ public class RedisChatMemory implements ChatMemory
         {
         }
 
-        public static StoredMessage from(Message message)
+        public StoredMessage(String type, String text)
         {
-            StoredMessage storedMessage = new StoredMessage();
-            storedMessage.type = message.getMessageType().name();
-            if (message instanceof UserMessage userMessage)
-            {
-                storedMessage.text = userMessage.getText();
-            }
-            else if (message instanceof AssistantMessage assistantMessage)
-            {
-                storedMessage.text = assistantMessage.getText();
-            }
-            else if (message instanceof SystemMessage systemMessage)
-            {
-                storedMessage.text = systemMessage.getText();
-            }
-            else
-            {
-                storedMessage.text = message.toString();
-            }
-            return storedMessage;
+            this.type = type;
+            this.text = text;
         }
 
         public String getType()
