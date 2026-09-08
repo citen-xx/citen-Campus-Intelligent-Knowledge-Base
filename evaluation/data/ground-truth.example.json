@@ -1,0 +1,15 @@
+{
+  "datasetVersion": "example-only-do-not-evaluate",
+  "samples": [
+    {
+      "id": "_example_q001",
+      "question": "国家奖学金申请需要满足什么条件？",
+      "expectedSources": [
+        {
+          "docId": "replace-with-real-doc-id",
+          "section": "申请条件"
+        }
+      ]
+    }
+  ]
+}
