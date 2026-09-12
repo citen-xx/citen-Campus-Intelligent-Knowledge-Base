@@ -8,7 +8,7 @@
 export default {
   computed: {
     visible() {
-      return this.$store.state.settings.footerVisible
+        return this.$store.state.settings.footerVisible
     },
     content() {
       return this.$store.state.settings.footerContent
